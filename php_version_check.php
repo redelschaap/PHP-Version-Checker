@@ -7,7 +7,7 @@
 		$php_crawler->scrapeFunctionIndex();
 		$php_crawler->scrapeFunctions();
 
-		$php_crawler->saveToXMLFile('functions/functions.xml');
+		$php_crawler->saveToXMLFile('functions/functions.xml', true);
 	}
 
 	if (!empty($_GET['action']) && $_GET['action'] == 'check_version') {
