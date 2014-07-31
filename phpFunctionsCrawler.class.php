@@ -13,7 +13,7 @@
 	 *              NOTE! By default, the max file pocessing size for the simple_html_dom class can be too low for the PHP.net website to crawl. You can set the MAX_FILE_SIZE constant to a higher value, something like 1500000
 	 *
 	 * @example     Use this class this way: $php_crawler = new phpFunctionsCrawler(); $php_crawler->scrapeFunctionIndex(); $php_crawler->scrapeFunctions(); $php_crawler->saveToXMLFile('functions/functions.xml');
-	 */ 
+	 */
 	class phpFunctionsCrawler
 	{
 
