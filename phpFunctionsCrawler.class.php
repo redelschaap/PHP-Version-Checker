@@ -2,395 +2,418 @@
 
 
 	/**
-	 * PHP Functions and Classes Version Checker
-	 * Checks PHP project files against the internal functions and classes of PHP to determine the minimum required PHP version
+	 * PHP Functions and Classes Crawler
+	 * Crawls the PHP.net website to get all known functions and classes with their names and required PHP versions and extensions
 	 *
 	 * @author      Ronald Edelschaap <rlwedelschaap@gmail.com> <first autohor>
-	 * @authors     ...
 	 * @lastupdated 31-07-2014
 	 * @license     http://www.gnu.org/licenses/gpl-2.0 GPL v2.0
 	 * @version     1.0
+	 * @use         This class makes use of the simple_html_dom class. This class can be found at http://simplehtmldom.sourceforge.net/
+	 *              NOTE! By default, the max file pocessing size for the simple_html_dom class can be too low for the PHP.net website to crawl. You can set the MAX_FILE_SIZE constant to a higher value, something like 1500000
 	 *
-	 * @example     Use this class this way: $php_version_checker = new phpVersionCheck('functions/functions.xml'); $php_version_checker->checkFiles(); $php_min_version = $php_version_checker->getResults();
-	 *
-	 * @todo        Add the functionality to follow objects with their functions. Some classes have methods with different minimum PHP versions. In the current version, when an object is assigned to a variable and that variable executes a method <eg. $var = new object(); $var->method();>, methods are handles like normal functions without classes. When you can connect methods to classes from objects, we will get a more reliable result. I don't know how to do this, so be my guest to build it!
+	 * @example     Use this class this way: $php_crawler = new phpFunctionsCrawler(); $php_crawler->scrapeFunctionIndex(); $php_crawler->scrapeFunctions(); $php_crawler->saveToXMLFile('functions/functions.xml');
 	 */
-
-
-	class phpVersionCheck
+	class phpFunctionsCrawler
 	{
-		private $fileTypes = array('php', 'phtml');
-		private $filesToCheck = array();
-		private $functionFile;
-		private $functions = array();
-		private $requiredVersion = null;
-		private $requiredVersionWarning = false;
-		private $requiredVersionWarningFunctions = array();
-		private $root;
-		private $usedClasses = array();
-		private $usedExtensions = array();
-		private $usedFunctions = array();
+
+		public $scraperData = array(
+			'all_functions'      => array(),
+			'functions'          => array(),
+			'functions_link'     => 'http://php.net/manual/en/indexes.functions.php',
+			'function_base_link' => 'http://php.net/manual/en/',
+			'http_status'        => 0
+		);
+		public $storeDescriptions = false;
+
+		private $alphabet = array('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '_');
+		private $alphabetLetter = null;
+		private $encoding = 'UTF-8';
+		private $scraper;
+		private $scraperExec;
+		private $scraperHtml;
+		private $scraperOptions = array(
+			CURLOPT_COOKIESESSION  => true,
+			CURLOPT_FOLLOWLOCATION => true,
+			CURLOPT_HTTPHEADER     => array(
+				'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+				'Accept-Charset: UTF-8',
+				'Accept-Language: en-US,en;q=0.8',
+				'Connection: keep-alive',
+				'Content-Type: charset=UTF-8'
+			),
+			CURLOPT_RETURNTRANSFER => true,
+			CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/35.0.1916.114 Safari/537.36'
+		);
 
 
-		/**
-		 * @param string $xmlFile Set the file with functions
-		 * @param string $root    The root directory of the project
-		 */
-		public function __construct($xmlFile, $root = '.')
+		function __construct()
 		{
+			if (!class_exists('simple_html_dom')) {
+				trigger_error('Class "simple_html_dom" does not exist on this system. Please include the "simple_html_dom.class.php" file before calling the "' . __CLASS__ . '" class', E_USER_ERROR);
+			}
+
+			if (!in_array('curl', get_loaded_extensions())) {
+				trigger_error('Extension cURL is not installed on this system. Please install cURL first', E_USER_ERROR);
+			}
+
 			//Enable error reporting
 			ini_set('display_errors', 'On');
 			error_reporting(E_ALL);
 
-
 			//Longer time limit so our script wont stop after 30 sec
 			set_time_limit(0);
-
-
-			//Set root dir
-			$this->root = realpath($root);
-
-			if (empty($this->root)) {
-				trigger_error('Root dir could not be resolved.', E_USER_ERROR);
-				exit;
-			}
-
-
-			//Read XML file with functions
-			if (!file_exists($xmlFile) || !is_readable($xmlFile)) {
-				trigger_error('XML file not found or not readable.', E_USER_ERROR);
-				exit;
-			}
-
-			$this->functionFile = $xmlFile;
-			$this->readFunctionFile();
 		}
 
 
 		/**
-		 * Scan the files in this project for used functions and classes and match those against the internal functions of PHP
+		 * Return all found functions in raw format (function names and their link to the PHP.net doc page), optionally selected by a letter
 		 *
-		 * @return int Returns the number of files this function walked through
-		 */
-		public function checkFiles()
-		{
-			$filesCount = 0;
-			$fileFunctions = array();
-
-			//Get files that we are going to check
-			$this->getFilesToCheck();
-
-			//Loop all the files
-			if (!empty($this->filesToCheck) && !empty($this->functions)) {
-
-				foreach ($this->filesToCheck as $file) {
-					$filesCount++;
-					$fileContent = file_get_contents($file);
-					$fileContentOffset = 0;
-
-					//Get the PHP code as long we have php opening tags left
-					while (stripos($fileContent, '<?php', $fileContentOffset) !== false) {
-
-						//Some scripts have no end tag
-						if (stripos($fileContent, '?>', $fileContentOffset) !== false) {
-							$filePhpCode = substr($fileContent, stripos($fileContent, '<?php', $fileContentOffset), (stripos($fileContent, '?>', $fileContentOffset) + 2));
-						} else {
-							$filePhpCode = substr($fileContent, stripos($fileContent, '<?php', $fileContentOffset));
-						}
-
-						//Get all functions we can find in this piece of code
-						$loopFileFunctions = array();
-						preg_match_all("/((new|function)[\s]*)?[a-zA-Z0-9\_:]+\s*\([^\)]*\)\s*;/", $filePhpCode, $loopFileFunctions);
-
-						if (!empty($loopFileFunctions)) {
-							$loopFileFunctions['fine'] = array();
-
-							foreach ($loopFileFunctions[0] as $loopFileFunction) {
-								$loopFileFunction = strstr($loopFileFunction, '(', true);
-
-								if (
-									strtolower(substr(str_ireplace(array('new', ' ', '::'), '', $loopFileFunction), 0, 4)) != 'self'
-									&&
-									strtolower(substr(str_ireplace(array('new', ' ', '::'), '', $loopFileFunction), 0, 6)) != 'parent'
-									&&
-									strtolower(substr($loopFileFunction, 0, 8)) != 'function'
-								) {
-									$loopFileFunctions['fine'][] = $loopFileFunction;
-								}
-							}
-
-							$fileFunctions = array_unique(array_merge($fileFunctions, $loopFileFunctions['fine']));
-						}
-
-						//Set a new offset for the next loop. Keep it simple, just add one position to the current start position.
-						$fileContentOffset = stripos($fileContent, '<?php', $fileContentOffset) + 1;
-					}
-				}
-
-
-				//Match the functions from the code against our functions
-				if (!empty($fileFunctions)) {
-
-					foreach ($fileFunctions as $fileFunction) {
-						$functionSearch = array();
-
-						if (strtolower(substr($fileFunction, 0, 3)) == 'new') {
-							$fileClass = str_ireplace(array('new', ' '), '', $fileFunction);
-							$functionSearch['class'] = $fileClass;
-						} else {
-
-							if (strpos($fileFunction, '::') !== false) {
-								$fileFunctionExp = explode('::', $fileFunction, 2);
-								$functionSearch['name'] = $fileFunctionExp[0];
-								$functionSearch['class'] = $fileFunctionExp[1];
-							} else {
-								$functionSearch['name'] = $fileFunction;
-								$functionSearch['class'] = null;
-							}
-						}
-
-						$result = searchArrayPairs($this->functions, $functionSearch);
-
-
-						//If $result has at least one match, add the corresponding values to the global $used* arrays
-						if (!empty($result)) {
-							$functionMatch = $this->functions[$result[0]];
-							$functionMatchName = $functionMatch['name'];
-
-							if (!empty($functionMatch['class'])) {
-								$functionMatchName = $functionMatch['class'] . '::' . $functionMatchName;
-
-								if (!array_key_exists(strtolower($functionMatch['class']), $this->usedClasses)) {
-									$this->usedClasses[strtolower($functionMatch['class'])] = $functionMatch['class'];
-								}
-							}
-
-							if (!array_key_exists(strtolower($functionMatchName), $this->usedFunctions)) {
-								$this->usedFunctions[strtolower($functionMatchName)] = $functionMatchName;
-							}
-
-							if (!empty($functionMatch['extension']) && !array_key_exists(strtolower($functionMatch['extension']['name']), $this->usedExtensions)) {
-								$this->usedExtensions[strtolower($functionMatch['extension']['name'])] = array('name' => $functionMatch['extension']['name']);
-
-								if (!empty($functionMatch['extension']['version'])) {
-									$this->usedExtensions[strtolower($functionMatch['extension']['name'])]['required_version'] = $functionMatch['extension']['version'];
-								}
-							} else {
-								if (!empty($functionMatch['extension']['version']) && (empty($this->usedExtensions[strtolower($functionMatch['extension']['name'])]['required_version']) || $functionMatch['extension']['version'] > $this->usedExtensions[strtolower($functionMatch['extension']['name'])]['required_version'])) {
-									$this->usedExtensions[strtolower($functionMatch['extension']['name'])]['required_version'] = $functionMatch['extension']['version'];
-								}
-							}
-
-							if (!empty($functionMatch['version'])) {
-								if (is_null($this->requiredVersion) || $functionMatch['version'] > $this->requiredVersion) {
-									$this->requiredVersion = $functionMatch['version'];
-								}
-							} else {
-								$this->requiredVersionWarning = true;
-
-								if (!array_key_exists(strtolower($functionMatchName), $this->requiredVersionWarningFunctions)) {
-									$this->requiredVersionWarningFunctions[strtolower($functionMatchName)] = $functionMatch;
-								}
-							}
-						}
-					}
-				}
-
-				sort($this->usedFunctions);
-				sort($this->usedClasses);
-				ksort($this->usedExtensions);
-				$this->usedExtensions = array_values($this->usedExtensions);
-				sort($this->requiredVersionWarningFunctions);
-			}
-
-			return $filesCount;
-		}
-
-
-		/**
-		 * Get the results after you used the checkFiles() method
+		 * @param string $letter
 		 *
-		 * @return array Returns an array containing the following keys: required_version, used_functions, used_classes, used_extensions and warning. The key required_version contains the minimum PHP version needed in this project, or 'unknown' if the version could not be determined. The key warning is FALSE by default, or contains a message when a function was used wherefor no version information is documented.
+		 * @return array
 		 */
-		public function getResults()
+		public function getFunctionIndex($letter = null)
 		{
-			$output = array(
-				'required_version' => $this->requiredVersion,
-				'used_functions'   => $this->usedFunctions,
-				'used_classes'     => $this->usedClasses,
-				'used_extensions'  => $this->usedExtensions,
-				'warning'          => false
-			);
-
-			if (empty($output['required_version'])) {
-				$output['required_version'] = 'Unknown';
-			}
-
-			if ($this->requiredVersionWarning) {
-				$output['warning'] = 'WARNING: the given required version could be higher, as the PHP.net documentation of some functions used in this project lacks details about the required PHP version.';
-
-				if (!empty($this->requiredVersionWarningFunctions)) {
-					$output['warning'] .= "\r\nThis is due to the use of the following functions: ";
-					$output['warning'] .= implode(', ', array_map(function ($v) {
-						return (!empty($v['class']) ? $v['class'] . '::' : '') . $v['name'];
-					}, $this->requiredVersionWarningFunctions));
-					$output['warning'] .= '.';
-				}
-			}
-
-			return $output;
-		}
-
-
-		/**
-		 * Scan a directory recursively for php files
-		 *
-		 * @param string $path Specify a path to get the files from, or leave null to scan the whole project
-		 */
-		private function getFilesToCheck($path = null)
-		{
-			if ($path === null) {
-				$path = $this->root;
+			if ($letter === null || !in_array(strtolower($letter), $this->alphabet)) {
+				return $this->scraperData['functions'];
 			} else {
-				$path = realpath($path);
-			}
-
-			//Search for all files
-			if (!isLinkReal($path)) {
-				if (is_dir($path) && is_readable($path)) {
-					$pathContent = scandirPathnames($path, true);
-
-					foreach ($pathContent as $subPath) {
-						$this->getFilesToCheck($subPath);
-					}
-				} elseif (is_file($path) && is_readable($path)) {
-					$file = pathinfo($path);
-
-					if ($path != __FILE__ && array_key_exists('extension', $file) && in_array(strtolower($file['extension']), $this->fileTypes)) {
-						$this->filesToCheck[] = $path;
-					}
-				}
+				return array((int)array_search(strtolower($letter), $this->alphabet) => $this->scraperData['functions'][(int)array_search(strtolower($letter), $this->alphabet)]);
 			}
 		}
 
 
 		/**
-		 * Read the ginven function file and put them in a global array
+		 * Return all found functions in pretty format, with name, version and extension info
+		 *
+		 * @return array
 		 */
-		private function readFunctionFile()
+		public function getFunctions()
 		{
-			//Load XML file
-			$xml = simplexml_load_file($this->functionFile);
-
-			//Convert XML object to an array and store it
-			$this->functions = json_decode(json_encode($xml), true);
-			$this->functions = $this->functions['function'];
-		}
-	}
-
-
-	/**
-	 * Lists files and directories with their full paths inside the specified path. Alternative for scandir().
-	 *
-	 * @param string   $directory
-	 * @param bool     $exclude_symbolic_links
-	 * @param int      $sorting_order
-	 * @param resource $context
-	 *
-	 * @see scandir()
-	 *
-	 * @return array|bool
-	 */
-	function scandirPathnames($directory, $exclude_symbolic_links = true, $sorting_order = SCANDIR_SORT_ASCENDING, $context = null)
-	{
-		$output = array();
-		$directory = realpath($directory);
-
-		if ($directory === false) {
-			return false;
+			return $this->scraperData['all_functions'];
 		}
 
-		if (is_null($context)) {
-			$files = @scandir($directory, $sorting_order);
-		} else {
-			$files = @scandir($directory, $sorting_order, $context);
-		}
 
-		if (!empty($files)) {
-			foreach ($files as $file) {
-				$file = $directory . DIRECTORY_SEPARATOR . $file;
-				if (!$exclude_symbolic_links || !isLinkReal($file)) {
-					$output[] = ($file);
-				}
+		/**
+		 * Save all found functions to a XML file
+		 *
+		 * @param string $file      The destination filepath (eg. functions/functions.xml), relative to the root. If the file does not exist, a new file will be created
+		 * @param bool   $clearFile If the destination file exists and $clearFile is TRUE, the file will be erased first. If $clearFile is FALSE, new functions will be appended to the file
+		 *
+		 * @todo When $clearFile is FALSE and the destination file already exists, check if identical functions (same name AND class) already exist in the file
+		 *
+		 * @return bool
+		 */
+		public function saveToXMLFile($file, $clearFile = false)
+		{
+			$path = pathinfo(ltrim($file, ' /\\'));
+
+			if (!empty(realpath($path['dirname']))) {
+				$path['dirname'] = realpath($path['dirname']);
+			} elseif (!is_dir(DIRECTORY_SEPARATOR . $path['dirname']) && (mkdir(realpath('.') . DIRECTORY_SEPARATOR . $path['dirname'], 0777, true) !== false)) {
+				$path['dirname'] = realpath(realpath('.') . DIRECTORY_SEPARATOR . $path['dirname']);
+			} else {
+				trigger_error('Could not resolve given file path or could not create a non-existing folder to put the file in.', E_USER_ERROR);
+
+				return false;
 			}
-		}
 
-		return $output;
-	}
+			if (!isset($path['extension']) || strtolower($path['extension']) != 'xml') {
+				$path['extension'] = 'xml';
+			}
 
-	/**
-	 * Search for one or more key-value pairs in a multidimensional array within the first level
-	 *
-	 * @param array $haystack The multidimensional array
-	 * @param array $needle   The key-value pair(s) in an array. When more than one key-value pair is given, this functions will try to match an array with at least these pairs (like an AND search function). If a value is null and $strict is set to FALSE, this function also matches arrays where that key does not exist
-	 * @param bool  $strict   Whether to also check the variable types of the values in the key-value pair(s)
-	 *
-	 * @return array This function returns an array containing the first level keys of $haystack where $needle was found
-	 */
-	function searchArrayPairs($haystack, $needle, $strict = false)
-	{
-		$needle_matches = array();
+			$file = $path['dirname'] . DIRECTORY_SEPARATOR . $path['filename'] . '.' . $path['extension'];
 
-		if (is_array($needle) && !empty($needle) && is_array($haystack) && !empty($haystack)) {
-			$needle_num = count($needle);
+			if (file_exists($file) && !is_writeable($file) && (chmod($file, 0777) === false)) {
+				trigger_error($file . ' is not writeable. Please chmod the file manually to 0777.', E_USER_ERROR);
 
-			foreach ($haystack as $h_key => $h_value) {
-				$needle_match = 0;
+				return false;
+			} elseif (!file_exists($file) && !is_writeable($path['dirname']) && (chmod($path['dirname'], 0777) === false)) {
+				trigger_error($path['dirname'] . ' is not writeable. Please chmod the file manually to 0777.', E_USER_ERROR);
 
-				if (is_array($h_value)) {
+				return false;
+			}
 
-					foreach ($needle as $n_key => $n_value) {
 
-						if ($n_value === null && !$strict && !array_key_exists($n_key, $h_value)) {
-							$needle_match++;
-						} elseif (array_key_exists($n_key, $h_value)) {
-							if (($strict && $h_value[$n_key] === $n_value) || ((!$strict) && $h_value[$n_key] == $n_value)) {
-								$needle_match++;
-							}
-						}
+			//Begin output
+			if (file_exists($file) && $clearFile == false) {
+				$xml = simplexml_load_file($file);
+			} else {
+				$xml = new SimpleXMLElement('<?xml version="1.0" encoding="UTF-8" ?><functions></functions>');
+				$xml->addAttribute('xmlns', '');
+				$xml->addAttribute('xsi:noNamespaceSchemaLocation', 'functions.xsd');
+				$xml->addAttribute('xmlns:xsi', 'http://www.w3.org/2001/XMLSchema-instance');
+			}
 
-						if ($needle_match == $needle_num) {
-							$needle_matches[] = $h_key;
-							break;
-						}
+			foreach ($this->scraperData['all_functions'] as $function) {
+				$child = $xml->addChild('function');
+				$child->addChild('name', $function['name']);
+
+				if ($this->storeDescriptions) {
+					$child->addChild('desc', $function['desc']);
+				}
+
+				$child->addChild('version', $function['version']);
+
+				if (isset($function['class'])) {
+					$child->addChild('class', $function['class']);
+				}
+
+				if (isset($function['extension']) && !empty($function['extension'])) {
+					$extension = $child->addChild('extension');
+					$extension->addChild('name', $function['extension']['name']);
+
+					if (!empty($function['extension']['version'])) {
+						$extension->addChild('version', $function['extension']['version']);
 					}
 				}
 			}
+
+			//Save the output to the file and clear our memory
+			$xml->asXML($file);
+			unset($xml);
+
+			return true;
 		}
 
-		return $needle_matches;
-	}
+
+		/**
+		 * Scrape the PHP.net function index page
+		 *
+		 * @return bool
+		 */
+		public function scrapeFunctionIndex()
+		{
+			//Init curl
+			$this->scraper = curl_init();
+
+			//Set the first url to get all the functions and apply curl options
+			$this->scraperOptions[CURLOPT_URL] = $this->scraperData['functions_link'];
+			curl_setopt_array($this->scraper, $this->scraperOptions);
+
+			//Execute curl and load the page, check if we received the page right and close the connection
+			$this->scraperExec = mb_convert_encoding(curl_exec($this->scraper), $this->encoding, 'HTML-ENTITIES');
+			$this->scraperData['http_status'] = (int)curl_getinfo($this->scraper, CURLINFO_HTTP_CODE);
+			curl_close($this->scraper);
+
+			//Reset the curl instance
+			$this->scraper = null;
 
 
-	/**
-	 * Tells whether the filename is a symbolic link. Other than is_link(), is_link_real() also checks if a directory is a symbolic link
-	 *
-	 * @param string $filename
-	 *
-	 * @return bool
-	 */
-	function isLinkReal($filename)
-	{
-		if (!is_dir($filename) && is_link($filename)) {
-			return true;
-		} elseif (is_dir($filename)) {
+			if ($this->scraperData['http_status'] == 200 || $this->scraperData['http_status'] == 304) {
+				//The response is in HTML format. Lets convert it to an object and put the usefull info in a associative array
+				$this->scraperHtml = new simple_html_dom();
+				$this->scraperHtml->load($this->scraperExec);
 
-			if (substr($filename, -1) == DIRECTORY_SEPARATOR) {
-				$filename = substr($filename, 0, -1);
+
+				//Get all letters
+				$letters = $this->scraperHtml->find('ul.index-for-refentry', 0)->find('li.gen-index');
+
+				foreach ($letters as $letter) {
+					$letter = array('letter' => strtolower(substr($letter->plaintext, 0, 1)), 'element' => $letter);
+
+					if (in_array($letter['letter'], $this->alphabet)) {
+						$letter['letter'] = (int)array_search($letter['letter'], $this->alphabet);
+
+						//Get all functions for this alphabet letter and put it in an array
+						$functions = $letter['element']->find('a');
+
+						foreach ($functions as $function) {
+							$this->scraperData['functions'][$letter['letter']][trim($function->plaintext)] = $function->href;
+						}
+					}
+				}
+
+
+				//We won't need this anymore
+				$this->scraperHtml->clear();
+
+
+				if (empty($this->scraperData['functions'])) {
+					trigger_error('Could not find any functions on the crawled page', E_USER_ERROR);
+
+					return false;
+				}
+			} else {
+				trigger_error('Could not load the index file. PHP.net may be unreachable or the function index url may have been changed', E_USER_ERROR);
+
+				return false;
 			}
 
-			return ($filename != realpath($filename));
+			return true;
 		}
 
-		return false;
+
+		/**
+		 * @param null $alphabetLetter
+		 *
+		 * @return bool
+		 */
+		public function scrapeFunctions($alphabetLetter = null)
+		{
+			if (empty($this->scraperData['functions'])) {
+				trigger_error('Functions are not yet indexed. Call scrapeFunctionIndex() first', E_USER_ERROR);
+
+				return false;
+			}
+
+			if ($alphabetLetter !== null) {
+				$this->setAlphabetLetter($alphabetLetter);
+
+				if (!is_array($this->scraperData['functions'][$this->alphabetLetter])) {
+					$this->scraperData['functions'][$this->alphabetLetter] = array();
+				}
+
+
+				//Scrape each function from this letter
+				foreach ($this->scraperData['functions'][$this->alphabetLetter] as $function) {
+					//Init curl
+					$this->scraper = curl_init();
+
+					//Set the first url to get all the functions and apply curl options
+					$this->scraperOptions[CURLOPT_URL] = $this->scraperData['function_base_link'] . $function;
+					curl_setopt_array($this->scraper, $this->scraperOptions);
+
+					//Execute curl and load the page, check if we received the page right and close the connection
+					$this->scraperExec = mb_convert_encoding(curl_exec($this->scraper), $this->encoding, 'HTML-ENTITIES');
+					$this->scraperData['http_status'] = (int)curl_getinfo($this->scraper, CURLINFO_HTTP_CODE);
+					curl_close($this->scraper);
+
+					//Reset the curl instance
+					$scraper = null;
+
+					if ($this->scraperData['http_status'] == 200 || $this->scraperData['http_status'] == 304) {
+
+						//The response is in HTML format. Lets convert it to an object and put the usefull info in a associative array
+						$this->scraperHtml = new simple_html_dom();
+						$this->scraperHtml->load($this->scraperExec);
+
+						$data = array(
+							'version'   => '',
+							'extension' => array(),
+							'desc'      => ''
+						);
+
+
+						//Each useful page has an paragraph element with a class named verinfo. If there is no such paragraph, this call will result in a non-object
+						if (is_object($this->scraperHtml->find('p.verinfo', 0))) {
+
+							//Get version information
+							$data['version_info'] = $this->scraperHtml->find('p.verinfo', 0)->plaintext;
+
+							if (strtolower(substr($data['version_info'], 0, 4)) == '(php') {
+								$data['version_info'] = explode(',', str_replace(', ', ',', trim($data['version_info'], '()')));
+
+								$data['version'] = array_shift($data['version_info']);
+								$data['version'] = array_reverse(explode('>', str_ireplace('&gt;', '>', str_ireplace(array('PHP', ' ', '='), '', $data['version']))));
+								$data['version'] = trim($data['version'][0]);
+
+								if (count($data['version_info']) > 0) {
+									$data['version_info'] = array_values($data['version_info']);
+									$data['version_info'] = array_reverse($data['version_info']);
+
+									if (strtolower(substr($data['version_info'][0], 0, 4)) != 'php ') {
+										$data['version_info'][0] = str_replace('>=', '>', str_ireplace('&gt;', '>', $data['version_info'][0]));
+
+										if (strpos($data['version_info'][0], '>') !== false) {
+											$data['version_info'][0] = explode('>', $data['version_info'][0]);
+											$data['extension'] = array('name' => trim($data['version_info'][0][0]), 'version' => trim($data['version_info'][0][1]));
+										} else {
+											$data['version_info'][0] = explode(' ', $data['version_info'][0]);
+											$data['extension']['version'] = trim(array_pop($data['version_info'][0]));
+											$data['extension']['name'] = trim(implode(' ', $data['version_info'][0]));
+										}
+									}
+								}
+							} elseif (strtolower(substr($data['version_info'], 0, 4)) != '(no ' && strtolower(substr($data['version_info'], 0, 4)) != '(unk') {
+								$data['version'] = '0';
+								$data['version_info'] = explode(',', str_replace(', ', ',', trim($data['version_info'], '()')));
+
+								if (count($data['version_info']) > 0) {
+									if (strtolower(substr($data['version_info'][0], 0, 4)) != 'php ') {
+										$data['version_info'][0] = str_replace('>=', '>', str_ireplace('&gt;', '>', $data['version_info'][0]));
+
+										if (strpos($data['version_info'][0], '>') !== false) {
+											$data['version_info'][0] = explode('>', $data['version_info'][0]);
+											$data['extension'] = array('name' => trim($data['version_info'][0][0]), 'version' => trim($data['version_info'][0][1]));
+										} else {
+											$data['version_info'][0] = explode(' ', $data['version_info'][0]);
+											$data['extension']['version'] = trim(array_pop($data['version_info'][0]));
+											$data['extension']['name'] = trim(implode(' ', $data['version_info'][0]));
+										}
+									}
+								}
+							} else {
+								$data['version'] = '0';
+							}
+
+							//Get description
+							$data['desc'] = str_replace(array('     ', '    ', '   '), ' ', str_replace('  ', ' ', trim($this->scraperHtml->find('span.dc-title', 0)->plaintext)));
+
+							//Get all function names. Some functions have more than one name (like object oriented and preocedural styles)
+							foreach ($this->scraperHtml->find('div.methodsynopsis span.methodname') as $methodName) {
+								$methodName = trim($methodName->plaintext);
+
+								if (strpos($methodName, '::') !== false) {
+									$method = explode('::', $methodName, 2);
+								} else {
+									$method = array(0 => '', 1 => $methodName);
+								}
+
+								$this->scraperData['all_functions'][$methodName] = array(
+									'name'    => $method[1],
+									'desc'    => $data['desc'],
+									'version' => $data['version']
+								);
+
+								if (!empty($method[0])) {
+									$this->scraperData['all_functions'][$methodName]['class'] = $method[0];
+								}
+
+								if (!empty($data['extension'])) {
+									$this->scraperData['all_functions'][$methodName]['extension'] = $data['extension'];
+								}
+							}
+
+							//We won't need this anymore
+							unset($data);
+							$this->scraperHtml->clear();
+						}
+					}
+				}
+			} else {
+				if (empty($_GET['do']) || $_GET['do'] != 'crawl_all_phpfunctions') {
+					trigger_error('No alphabet letter selected. PHP has almost 10 000 functions. It will take some time to crawl all those functions in one batch. Set the first parameter of this method to select a letter (a-z or _), or add "?do=crawl_all_phpfunctions" to the current URL to crawl all functions', E_USER_NOTICE);
+
+					return false;
+				} else {
+					trigger_error('No alphabet letter selected. PHP has almost 10 000 functions. It will take some time to crawl all those functions in one batch', E_USER_NOTICE);
+
+					foreach ($this->alphabet as $letter) {
+						$this->scrapeFunctions($letter);
+					}
+				}
+			}
+
+			return true;
+		}
+
+
+		/**
+		 * Set the current alphabet letter
+		 *
+		 * @param null $letter
+		 *
+		 * @return bool
+		 */
+		private function setAlphabetLetter($letter = null)
+		{
+			if ($letter === null || !in_array(strtolower($letter), $this->alphabet)) {
+				$this->alphabetLetter = null;
+			} else {
+				$this->alphabetLetter = (int)array_search(strtolower($letter), $this->alphabet);
+			}
+
+			return true;
+		}
 	}
